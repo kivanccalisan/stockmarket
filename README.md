@@ -12,3 +12,4 @@ Sonuçları Excel'e yazar
 Model başarılarını, tahmin kalitesini ve öznitelik önemini görselleştirir
 
 
+https://www.kaggle.com/datasets/agrafintech/turkish-public-companies-balance-sheets-from-kap

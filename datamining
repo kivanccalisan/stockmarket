@@ -1,0 +1,136 @@
+import os
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.impute import SimpleImputer
+from sklearn.preprocessing import StandardScaler
+from sklearn.pipeline import make_pipeline
+from sklearn.linear_model import LinearRegression
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.svm import SVR
+from xgboost import XGBRegressor
+from sklearn.metrics import r2_score
+
+# ------------------------------------------------------
+# 1. Tüm Excel dosyalarını birleştir
+# ------------------------------------------------------
+klasor_yolu = "veri_klasoru"
+tum_df_list = []
+
+for dosya in os.listdir(klasor_yolu):
+    if dosya.endswith(".xlsx"):
+        yol = os.path.join(klasor_yolu, dosya)
+        try:
+            df = pd.read_excel(yol)
+            df["DosyaAdi"] = dosya  # Hangi dosyadan geldiğini not et
+            tum_df_list.append(df)
+        except Exception as e:
+            print(f"{dosya} okunamadı: {e}")
+
+df = pd.concat(tum_df_list, ignore_index=True)
+
+# ------------------------------------------------------
+# 2. Sayısal verileri seç ve hedef değişkeni tanımla
+# ------------------------------------------------------
+target = "Dönem Net Kar/Zararı"
+df[target] = pd.to_numeric(df[target], errors="coerce")
+sayisal_sutunlar = df.select_dtypes(include="number").columns.tolist()
+
+if target not in sayisal_sutunlar:
+    raise ValueError("Hedef sütun bulunamadı.")
+
+sayisal_sutunlar.remove(target)
+
+# Tüm sayısal sütunları koru ve eksik değerleri ortalamayla doldur
+X_raw = df[sayisal_sutunlar]
+y_raw = df[target]
+
+# ------------------------------------------------------
+# 3. Otomatik öznitelik seçimi (yüksek korelasyon)
+# ------------------------------------------------------
+corr = df[sayisal_sutunlar + [target]].corr()
+korlu = corr[target].dropna().abs().sort_values(ascending=False)
+secili_ozellikler = korlu[korlu > 0.2].index.tolist()  # 0.2 üstü korelasyon
+if target in secili_ozellikler:
+    secili_ozellikler.remove(target)
+
+X = df[secili_ozellikler]
+y = y_raw
+
+# Eksik verileri ortalamayla doldur
+imputer = SimpleImputer(strategy="mean")
+X = pd.DataFrame(imputer.fit_transform(X), columns=secili_ozellikler)
+y = y.fillna(y.mean())
+
+# ------------------------------------------------------
+# 4. Risk sınıflandırması (zarar eden = yüksek risk)
+# ------------------------------------------------------
+df["Risk_Sinifi"] = ["Yüksek Risk" if val < 0 else "Düşük Risk" for val in y]
+
+# ------------------------------------------------------
+# 5. Regresyon modelleri ile tahmin
+# ------------------------------------------------------
+def make_model(estimator):
+    return make_pipeline(
+        StandardScaler(),
+        estimator
+    )
+
+modeller = {
+    "linear_regression": make_model(LinearRegression()),
+    "random_forest": make_model(RandomForestRegressor(random_state=42)),
+    "xgboost": make_model(XGBRegressor(objective="reg:squarederror", random_state=42)),
+    "svr": make_model(SVR())
+}
+
+r2_skorlar = {}
+for isim, model in modeller.items():
+    model.fit(X, y)
+    y_pred = model.predict(X)
+    df[f"kar_tahmini_{isim}"] = y_pred
+    r2_skorlar[isim] = r2_score(y, y_pred)
+
+# ------------------------------------------------------
+# 6. Çıktı dosyasını yaz
+# ------------------------------------------------------
+birlesik_dosya = "tum_sirketler_birlesik_tahminli.xlsx"
+df_out = df[secili_ozellikler + ["Dönem Net Kar/Zararı", "Risk_Sinifi"] + [f"kar_tahmini_{k}" for k in modeller.keys()] + ["DosyaAdi"]]
+df_out.to_excel(birlesik_dosya, index=False)
+print(f"✅ Tüm veriler işlendi ve '{birlesik_dosya}' dosyasına kaydedildi.")
+
+# ------------------------------------------------------
+# 7. Görselleştirme: Model başarıları
+# ------------------------------------------------------
+plt.figure(figsize=(8, 5))
+plt.bar(r2_skorlar.keys(), r2_skorlar.values(), color='skyblue')
+plt.ylabel("R² Skoru")
+plt.title("Model Performans Karşılaştırması")
+plt.ylim(0, 1)
+plt.grid(axis='y', linestyle='--', alpha=0.5)
+plt.tight_layout()
+plt.show()
+
+# ------------------------------------------------------
+# 8. Görselleştirme: Özellik önemleri
+# ------------------------------------------------------
+def plot_feature_importance(model_pipeline, model_name):
+    model = model_pipeline[-1]
+    if hasattr(model, "feature_importances_"):
+        importances = model.feature_importances_
+    elif hasattr(model, "coef_"):
+        importances = model.coef_
+    else:
+        print(f"{model_name} için özellik önemi hesaplanamadı.")
+        return
+
+    sorted_idx = np.argsort(np.abs(importances))[::-1]
+    plt.figure(figsize=(10, 6))
+    plt.barh([secili_ozellikler[i] for i in sorted_idx], np.abs(importances[sorted_idx]), color='teal')
+    plt.xlabel("Özellik Önemi")
+    plt.title(f"{model_name} için Özellik Önemi")
+    plt.gca().invert_yaxis()
+    plt.tight_layout()
+    plt.show()
+
+for isim, model in modeller.items():
+    plot_feature_importance(model, isim)
